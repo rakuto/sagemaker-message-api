@@ -74,7 +74,7 @@ pub fn apply_chat_template_nvidia_llama3_chatqa<S: AsRef<str>>(
 pub fn apply_chat_template<S>(
     model: S,
     messages: &[ChatCompletionsMessage],
-    context: Option<S>) -> Result<String>
+    context: Option<String>) -> Result<String>
 where
     S: AsRef<str>,
 {

@@ -92,7 +92,7 @@ async fn chat_completions(
     let content_type = "application/json".to_owned();
     let prompt = if payload.model.to_lowercase().contains("-instruct") ||
         payload.model.eq("Llama3-ChatQA-1.5-8B") {
-        apply_chat_template(&payload.model, &payload.messages, None).unwrap()
+        apply_chat_template(&payload.model, &payload.messages, payload.context.to_owned()).unwrap()
     } else {
         payload.messages.iter().map(|m| m.content.to_owned()).collect::<Vec<String>>().join("\n")
     };
