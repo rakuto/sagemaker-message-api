@@ -133,6 +133,25 @@ User: Hello. What can you help?
 
 Assistant: ";
 
-        assert_eq!(apply_chat_template_nvidia_llama3_chatqa(messages, context).unwrap(), expected);
+        assert_eq!(apply_chat_template_nvidia_llama3_chatqa(messages, context.clone()).unwrap(), expected);
+
+        // Multiturn chat
+        let messages = &[
+            ChatCompletionsMessage::new("system", "You are artificial intelligence assistant."),
+            ChatCompletionsMessage::new("user", "Hello. What can you help?"),
+            ChatCompletionsMessage::new("assistant", "I'm an AI assistant, and I'd be happy to help with a wide range of tasks."),
+            ChatCompletionsMessage::new("user", "Nice. What else can you do?"),
+        ];
+        let expected = "\
+System: You are artificial intelligence assistant.
+
+User: Hello. What can you help?
+
+Assistant: I'm an AI assistant, and I'd be happy to help with a wide range of tasks.
+
+User: Nice. What else can you do?
+
+Assistant: ";
+        assert_eq!(apply_chat_template_nvidia_llama3_chatqa(messages, context.clone()).unwrap(), expected);
     }
 }
