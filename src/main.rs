@@ -58,7 +58,7 @@ struct Args {
     address: String,
 
     /// HTTP server port
-    #[arg(short, long, default_value_t = 8888)]
+    #[arg(short, long, default_value_t = 8900)]
     port: u16,
 
     /// A path to SageMaker inference endpoints config file.
@@ -90,7 +90,8 @@ async fn chat_completions(
         None => return (StatusCode::BAD_REQUEST, "Unsupported model").into_response(),
     };
     let content_type = "application/json".to_owned();
-    let prompt = if payload.model.to_lowercase().contains("-instruct") {
+    let prompt = if payload.model.to_lowercase().contains("-instruct") ||
+        payload.model.eq("Llama3-ChatQA-1.5-8B") {
         apply_chat_template(&payload.model, &payload.messages, None).unwrap()
     } else {
         payload.messages.iter().map(|m| m.content.to_owned()).collect::<Vec<String>>().join("\n")
@@ -109,7 +110,7 @@ async fn chat_completions(
     }.serialize();
 
     // EOS token
-    let eot = if payload.model.starts_with("Llama-") {
+    let eot = if payload.model.starts_with("Llama") {
         "<|eot_id|>"
     } else if payload.model.starts_with("Phi-3") {
         "<|end|>"
