@@ -1,0 +1,22 @@
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+images:
+  - name: msgapi
+    newName: 825062525148.dkr.ecr.us-west-2.amazonaws.com/msgapi
+    newTag: latest
+configMapGenerator:
+  - name: msgapi-config
+    literals:
+      - RUST_LOG=debug
+      - OTEL_SERVICE_NAME=msgapi
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-cluster-collector.otel.svc.cluster.local:4317
+      - OTEL_LOGS_EXPORTER=otlp
+      - OTEL_METRICS_EXPORTER=otlp
+      - OTEL_TRACES_EXPORTER=otlp
+      - OTEL_PROPAGATORS=tracecontext,baggage
+      - OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_SERVER_REQUEST=.*
+  - name: msgapi-endpoint-config
+    files:
+      - endpoints.yaml
