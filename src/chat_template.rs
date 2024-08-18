@@ -108,6 +108,82 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_chat_template_llama31_tool_call() {
+        let mut messages = &[
+            ChatCompletionsMessage::new("system", "You are a helpful assistant with tool calling capabilities. When you receive a tool call response, use the output to format an answer to the orginal use question."),
+            ChatCompletionsMessage::new("user", r#"Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.
+
+{
+    "type": "function",
+    "function": {
+    "name": "get_current_conditions",
+    "description": "Get the current weather conditions for a specific location",
+    "parameters": {
+        "type": "object",
+        "properties": {
+        "location": {
+            "type": "string",
+            "description": "The city and state, e.g., San Francisco, CA"
+        },
+        "unit": {
+            "type": "string",
+            "enum": ["Celsius", "Fahrenheit"],
+            "description": "The temperature unit to use. Infer this from the user's location."
+        }
+        },
+        "required": ["location", "unit"]
+    }
+    }
+}
+
+Question: what is the weather like in San Fransisco?"#),
+            ChatCompletionsMessage::new("assistant", r#"{"name": "get_current_conditions", "parameters": {"location": "San Francisco, CA", "unit": "Fahrenheit"}}"#),
+            ChatCompletionsMessage::new("ipython", r#"{"output": "Clouds giving way to sun Hi: 76° Tonight: Mainly clear early, then areas of low clouds forming Lo: 56°"}"#),
+        ];
+
+        let expected = r#"<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+You are a helpful assistant with tool calling capabilities. When you receive a tool call response, use the output to format an answer to the orginal use question.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.
+
+Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. Do not use variables.
+
+{
+    "type": "function",
+    "function": {
+    "name": "get_current_conditions",
+    "description": "Get the current weather conditions for a specific location",
+    "parameters": {
+        "type": "object",
+        "properties": {
+        "location": {
+            "type": "string",
+            "description": "The city and state, e.g., San Francisco, CA"
+        },
+        "unit": {
+            "type": "string",
+            "enum": ["Celsius", "Fahrenheit"],
+            "description": "The temperature unit to use. Infer this from the user's location."
+        }
+        },
+        "required": ["location", "unit"]
+    }
+    }
+}
+
+Question: what is the weather like in San Fransisco?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+{"name": "get_current_conditions", "parameters": {"location": "San Francisco, CA", "unit": "Fahrenheit"}}<|eot_id|><|start_header_id|>ipython<|end_header_id|>
+
+{"output": "Clouds giving way to sun Hi: 76° Tonight: Mainly clear early, then areas of low clouds forming Lo: 56°"}<|eot_id|>"#;
+        println!("{}", apply_chat_template_llama3(messages));
+        assert_eq!(apply_chat_template_llama3(messages), expected);
+    }
+
+    #[test]
     fn test_apply_chat_template_nvidia_llama3_chatqa() {
         let messages = &[
             ChatCompletionsMessage::new("system", "You are artificial intelligence assistant."),

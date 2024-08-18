@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use crate::chat_template::{apply_chat_template, apply_chat_template_llama3};
 use crate::endpoint_loader::EndpointLoader;
-use crate::types::{ChatCompletions, ChatCompletionsChoice, ChatCompletionsChoiceDelta, ChatCompletionsMessage, ChatCompletionsResponse, ChatCompletionsUsage, PredictionOutput, PredictParams, PredictRequest};
+use crate::types::{BedrockRequest, BedrockResponse, ChatCompletions, ChatCompletionsChoice, ChatCompletionsChoiceDelta, ChatCompletionsMessage, ChatCompletionsResponse, ChatCompletionsUsage, PredictParams, SMPredictionOutput, SMPredictionRequest};
 
 mod chat_template;
 mod types;
@@ -69,6 +69,7 @@ struct Args {
 #[derive(Clone, Debug)]
 struct AppState {
     smr_client: Arc<sagemakerruntime::Client>,
+    bedrock_client: Arc<aws_sdk_bedrockruntime::Client>,
     endpoints: Arc<EndpointLoader>,
 }
 
@@ -98,16 +99,6 @@ async fn chat_completions(
     };
 
     let created = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let body = PredictRequest {
-        inputs: prompt,
-        parameters: Some(PredictParams {
-            top_p: payload.top_p,
-            top_k: payload.top_k,
-            temperature: payload.temperature,
-            max_new_tokens: payload.max_tokens,
-            do_sample: payload.do_sample,
-        }),
-    }.serialize();
 
     // EOS token
     let eot = if payload.model.starts_with("Llama") {
@@ -118,25 +109,80 @@ async fn chat_completions(
         return (StatusCode::BAD_REQUEST, "Unsupported model").into_response();
     };
 
-    if payload.stream.unwrap_or(false) {
-        let mut output = state.smr_client.invoke_endpoint_with_response_stream()
-            .set_inference_id(Some(req_id.to_string()))
-            .set_endpoint_name(Some(endpoint.endpoint_name.to_owned()))
-            .set_inference_component_name(
-                if let Some(inference_component) = &endpoint.inference_component {
-                    Some(inference_component.to_owned())
-                } else {
-                    None
-                }
-            )
+    if endpoint.backend == "Bedrock" {
+        // if payload.stream.unwrap_or(false) {
+        let body = BedrockRequest {
+            prompt,
+            top_p: payload.top_p,
+            temperature: payload.temperature,
+            max_gen_len: payload.max_tokens,
+        }.serialize();
+
+        let mut output = state.bedrock_client.invoke_model()
+            .set_model_id(Some(endpoint.target_model.to_owned().expect("target_model must be set for Bedrock backend")))
+            .set_content_type(Some("application/json".to_owned()))
+            .set_accept(Some("application/json".to_owned()))
             .set_body(Some(body))
-            .set_content_type(Some(content_type))
             .send()
             .await
-            .unwrap();
+            .expect("invoke_model error");
+
+        let predict_output: BedrockResponse = serde_json::from_slice(output.body.as_ref()).unwrap();
+
+        let output = ChatCompletionsResponse {
+            id: req_id.to_string(),
+            object: "chat.completion".to_owned(),
+            created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            model: payload.model.to_owned(),
+            choices: vec![
+                ChatCompletionsChoice {
+                    index: 0,
+                    message: Some(ChatCompletionsMessage {
+                        role: "assistant".to_owned(),
+                        content: predict_output.generation,
+                    }),
+                    delta: None,
+                    finish_reason: Some(predict_output.stop_reason),
+                    logprobs: None,
+                }
+            ],
+            system_fingerprint: None,
+            usage: Some(ChatCompletionsUsage::default()),
+        };
+
+        Json(output).into_response()
+        // }
+    } else {
+        let body = SMPredictionRequest {
+            inputs: prompt,
+            parameters: Some(PredictParams {
+                top_p: payload.top_p,
+                top_k: payload.top_k,
+                temperature: payload.temperature,
+                max_new_tokens: payload.max_tokens,
+                do_sample: payload.do_sample,
+            }),
+        }.serialize();
+
+        if payload.stream.unwrap_or(false) {
+            let mut output = state.smr_client.invoke_endpoint_with_response_stream()
+                .set_inference_id(Some(req_id.to_string()))
+                .set_endpoint_name(Some(endpoint.endpoint_name.to_owned().expect("endpoint_name must be set")))
+                .set_inference_component_name(
+                    if let Some(inference_component) = &endpoint.inference_component {
+                        Some(inference_component.to_owned())
+                    } else {
+                        None
+                    }
+                )
+                .set_body(Some(body))
+                .set_content_type(Some(content_type))
+                .send()
+                .await
+                .unwrap();
 
 
-        let mut stream_response = Box::pin(async_stream! {
+            let mut stream_response = Box::pin(async_stream! {
             let start_seq = "{\"generated_text\": \"";
             let stop_seq = "\"}";
 
@@ -166,10 +212,10 @@ async fn chat_completions(
             }
         });
 
-        let object = "chat.completion.chunk";
-        let mut first_response = true;
-        let mut done = false;
-        let stream_responder = Box::pin(async_stream! {
+            let object = "chat.completion.chunk";
+            let mut first_response = true;
+            let mut done = false;
+            let stream_responder = Box::pin(async_stream! {
             while let Some(Ok(mut chunk)) = stream_response.next().await {
                 let mut finish_reason: Option<String> = None;
                 if chunk.as_ref().is_some() {
@@ -219,68 +265,69 @@ async fn chat_completions(
             }
         });
 
-        Sse::new(stream_responder)
-            .keep_alive(KeepAlive::default())
-            .into_response()
-    } else {
-        let output = state.smr_client.invoke_endpoint()
-            .set_inference_id(Some(req_id.to_string()))
-            .set_endpoint_name(Some(endpoint.endpoint_name.to_owned()))
-            .set_inference_component_name(
-                if let Some(inference_component) = &endpoint.inference_component {
-                    Some(inference_component.to_owned())
-                } else {
-                    None
-                }
-            )
-            .set_target_model(
-                if let Some(target_model) = &endpoint.target_model {
-                    Some(target_model.to_owned())
-                } else {
-                    None
-                }
-            )
-            .set_body(Some(body))
-            .set_content_type(Some(content_type))
-            .send()
-            .await
-            .expect("invoke error");
-
-        let predict_output: PredictionOutput = serde_json::from_slice(output.body.unwrap().as_ref()).unwrap();
-        let eot_pos = predict_output.generated_text.find(eot);
-
-        let mut finish_reason: String;
-        let mut assistant_output: String;
-        if let Some(pos) = eot_pos {
-            finish_reason = "stop".to_owned();
-            assistant_output = predict_output.generated_text[0..pos].to_owned()
+            Sse::new(stream_responder)
+                .keep_alive(KeepAlive::default())
+                .into_response()
         } else {
-            finish_reason = "length".to_owned();
-            assistant_output = predict_output.generated_text;
-        };
+            let output = state.smr_client.invoke_endpoint()
+                .set_inference_id(Some(req_id.to_string()))
+                .set_endpoint_name(Some(endpoint.endpoint_name.to_owned().expect("endpoint_name must be set")))
+                .set_inference_component_name(
+                    if let Some(inference_component) = &endpoint.inference_component {
+                        Some(inference_component.to_owned())
+                    } else {
+                        None
+                    }
+                )
+                .set_target_model(
+                    if let Some(target_model) = &endpoint.target_model {
+                        Some(target_model.to_owned())
+                    } else {
+                        None
+                    }
+                )
+                .set_body(Some(body))
+                .set_content_type(Some(content_type))
+                .send()
+                .await
+                .expect("invoke error");
 
-        let output = ChatCompletionsResponse {
-            id: req_id.to_string(),
-            object: "chat.completion".to_owned(),
-            created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            model: payload.model.to_owned(),
-            choices: vec![
-                ChatCompletionsChoice {
-                    index: 0,
-                    message: Some(ChatCompletionsMessage {
-                        role: "assistant".to_owned(),
-                        content: assistant_output,
-                    }),
-                    delta: None,
-                    finish_reason: Some(finish_reason),
-                    logprobs: None,
-                }
-            ],
-            system_fingerprint: None,
-            usage: Some(ChatCompletionsUsage::default()),
-        };
+            let predict_output: SMPredictionOutput = serde_json::from_slice(output.body.unwrap().as_ref()).unwrap();
+            let eot_pos = predict_output.generated_text.find(eot);
 
-        Json(output).into_response()
+            let mut finish_reason: String;
+            let mut assistant_output: String;
+            if let Some(pos) = eot_pos {
+                finish_reason = "stop".to_owned();
+                assistant_output = predict_output.generated_text[0..pos].to_owned()
+            } else {
+                finish_reason = "length".to_owned();
+                assistant_output = predict_output.generated_text;
+            };
+
+            let output = ChatCompletionsResponse {
+                id: req_id.to_string(),
+                object: "chat.completion".to_owned(),
+                created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                model: payload.model.to_owned(),
+                choices: vec![
+                    ChatCompletionsChoice {
+                        index: 0,
+                        message: Some(ChatCompletionsMessage {
+                            role: "assistant".to_owned(),
+                            content: assistant_output,
+                        }),
+                        delta: None,
+                        finish_reason: Some(finish_reason),
+                        logprobs: None,
+                    }
+                ],
+                system_fingerprint: None,
+                usage: Some(ChatCompletionsUsage::default()),
+            };
+
+            Json(output).into_response()
+        }
     }
 }
 
@@ -307,6 +354,7 @@ async fn main() {
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(AppState {
             smr_client: Arc::new(sagemakerruntime::Client::new(&config)),
+            bedrock_client: Arc::new(aws_sdk_bedrockruntime::Client::new(&config)),
             endpoints: Arc::new(EndpointLoader::load(args.config).expect("unable to load config file")),
         })
         .layer(

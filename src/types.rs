@@ -83,20 +83,41 @@ pub struct PredictParams {
     pub do_sample: Option<bool>,
 }
 
-impl PredictRequest {
+impl SMPredictionRequest {
     pub fn serialize(&self) -> Blob {
         Blob::new(json!(self).to_string().as_str())
     }
 }
 
 #[derive(Serialize, Debug, Default)]
-pub struct PredictRequest {
+pub struct SMPredictionRequest {
     pub inputs: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<PredictParams>,
 }
 
 #[derive(Deserialize, Debug)]
-pub struct PredictionOutput {
+pub struct SMPredictionOutput {
     pub generated_text: String,
+}
+
+#[derive(Serialize, Debug, Default)]
+pub struct BedrockRequest {
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_gen_len: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+}
+
+impl BedrockRequest {
+    pub fn serialize(&self) -> Blob { Blob::new(json!(self).to_string().as_str()) }
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct BedrockResponse {
+    pub generation: String,
+    pub stop_reason: String,
 }

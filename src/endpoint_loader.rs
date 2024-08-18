@@ -8,7 +8,7 @@ use serde::Deserialize;
 #[derive(Deserialize, Debug)]
 pub struct Endpoint {
     pub model: String,
-    pub endpoint_name: String,
+    pub endpoint_name: Option<String>,
     pub target_model: Option<String>,
     pub inference_component: Option<String>,
     pub backend: String,
