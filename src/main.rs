@@ -43,7 +43,7 @@ use uuid::Uuid;
 
 use crate::chat_template::{apply_chat_template, apply_chat_template_llama3};
 use crate::endpoint_loader::EndpointLoader;
-use crate::types::{BedrockRequest, BedrockResponse, ChatCompletions, ChatCompletionsChoice, ChatCompletionsChoiceDelta, ChatCompletionsMessage, ChatCompletionsResponse, ChatCompletionsUsage, PredictParams, SMPredictionOutput, SMPredictionRequest};
+use crate::types::{BedrockRequest, BedrockResponse, BedrockStreamResponse, ChatCompletions, ChatCompletionsChoice, ChatCompletionsChoiceDelta, ChatCompletionsMessage, ChatCompletionsResponse, ChatCompletionsUsage, PredictParams, SMPredictionOutput, SMPredictionRequest};
 
 mod chat_template;
 mod types;
@@ -110,7 +110,6 @@ async fn chat_completions(
     };
 
     if endpoint.backend == "Bedrock" {
-        // if payload.stream.unwrap_or(false) {
         let body = BedrockRequest {
             prompt,
             top_p: payload.top_p,
@@ -118,40 +117,97 @@ async fn chat_completions(
             max_gen_len: payload.max_tokens,
         }.serialize();
 
-        let mut output = state.bedrock_client.invoke_model()
-            .set_model_id(Some(endpoint.target_model.to_owned().expect("target_model must be set for Bedrock backend")))
-            .set_content_type(Some("application/json".to_owned()))
-            .set_accept(Some("application/json".to_owned()))
-            .set_body(Some(body))
-            .send()
-            .await
-            .expect("invoke_model error");
+        if payload.stream.unwrap_or(false) {
+            let mut output = state.bedrock_client.invoke_model_with_response_stream()
+                .set_model_id(Some(endpoint.target_model.to_owned().expect("target_model must be set for Bedrock backend")))
+                .set_accept(Some("application/json".to_owned()))
+                .set_content_type(Some("application/json".to_owned()))
+                .set_body(Some(body))
+                .send()
+                .await
+                .expect("invoke_model_with_response_stream error");
 
-        let predict_output: BedrockResponse = serde_json::from_slice(output.body.as_ref()).unwrap();
 
-        let output = ChatCompletionsResponse {
-            id: req_id.to_string(),
-            object: "chat.completion".to_owned(),
-            created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            model: payload.model.to_owned(),
-            choices: vec![
-                ChatCompletionsChoice {
-                    index: 0,
-                    message: Some(ChatCompletionsMessage {
-                        role: "assistant".to_owned(),
-                        content: predict_output.generation,
-                    }),
-                    delta: None,
-                    finish_reason: Some(predict_output.stop_reason),
-                    logprobs: None,
+            let stream_responder = Box::pin(async_stream! {
+                let object = "chat.completion.chunk";
+                loop {
+                    match output.body.recv().await {
+                        Ok(Some(response_stream)) => {
+                            let payload_part = response_stream.as_chunk().unwrap();
+                            let chunk = payload_part.bytes.as_ref().unwrap().as_ref();
+                            let resp: BedrockStreamResponse = serde_json::from_slice(chunk).expect("BedrockStreamRespoonse deserialization error");
+                            let data = ChatCompletionsResponse {
+                                id: req_id.to_string(),
+                                object: object.to_owned(),
+                                created,
+                                model: payload.model.to_owned(),
+                                system_fingerprint: None,
+                                choices: vec![
+                                    ChatCompletionsChoice {
+                                        index: 0,
+                                        message: None,
+                                        delta: Some(ChatCompletionsChoiceDelta {
+                                            role: Some("assistant".to_owned()),
+                                            content: Some(resp.generation),
+                                        }),
+                                        logprobs: None,
+                                        finish_reason: resp.stop_reason,
+                                    }
+                                ],
+                                usage: None,
+                            };
+
+                            let event: Result<Event, Error> = Ok(Event::default().json_data(data).unwrap());
+                            yield event;
+                        }
+                        Ok(None) => {
+                            break
+                        }
+                        Err(err) => {
+                            error!("inference_with_response_stream error: {}", err.to_string())
+                        }
+                    }
                 }
-            ],
-            system_fingerprint: None,
-            usage: Some(ChatCompletionsUsage::default()),
-        };
+            });
 
-        Json(output).into_response()
-        // }
+            Sse::new(stream_responder)
+                .keep_alive(KeepAlive::default())
+                .into_response()
+        } else {
+            let mut output = state.bedrock_client.invoke_model()
+                .set_model_id(Some(endpoint.target_model.to_owned().expect("target_model must be set for Bedrock backend")))
+                .set_content_type(Some("application/json".to_owned()))
+                .set_accept(Some("application/json".to_owned()))
+                .set_body(Some(body))
+                .send()
+                .await
+                .expect("invoke_model error");
+
+            let predict_output: BedrockResponse = serde_json::from_slice(output.body.as_ref()).unwrap();
+
+            let output = ChatCompletionsResponse {
+                id: req_id.to_string(),
+                object: "chat.completion".to_owned(),
+                created: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                model: payload.model.to_owned(),
+                choices: vec![
+                    ChatCompletionsChoice {
+                        index: 0,
+                        message: Some(ChatCompletionsMessage {
+                            role: "assistant".to_owned(),
+                            content: predict_output.generation,
+                        }),
+                        delta: None,
+                        finish_reason: Some(predict_output.stop_reason),
+                        logprobs: None,
+                    }
+                ],
+                system_fingerprint: None,
+                usage: Some(ChatCompletionsUsage::default()),
+            };
+
+            Json(output).into_response()
+        }
     } else {
         let body = SMPredictionRequest {
             inputs: prompt,
@@ -216,54 +272,54 @@ async fn chat_completions(
             let mut first_response = true;
             let mut done = false;
             let stream_responder = Box::pin(async_stream! {
-            while let Some(Ok(mut chunk)) = stream_response.next().await {
-                let mut finish_reason: Option<String> = None;
-                if chunk.as_ref().is_some() {
-                    if let Some(end_pos) = chunk.as_ref().unwrap().find(eot) {
-                        chunk = Some(chunk.as_ref().unwrap()[0..end_pos].to_owned());
-                        finish_reason = Some("stop".to_owned());
+                while let Some(Ok(mut chunk)) = stream_response.next().await {
+                    let mut finish_reason: Option<String> = None;
+                    if chunk.as_ref().is_some() {
+                        if let Some(end_pos) = chunk.as_ref().unwrap().find(eot) {
+                            chunk = Some(chunk.as_ref().unwrap()[0..end_pos].to_owned());
+                            finish_reason = Some("stop".to_owned());
+                            done = true;
+                        }
+                    } else {
+                        finish_reason = Some("length".to_owned());
                         done = true;
                     }
-                } else {
-                    finish_reason = Some("length".to_owned());
-                    done = true;
+                    let role = if first_response {
+                        first_response = false;
+                        Some("assistant".to_owned())
+                    } else {
+                        None
+                    };
+
+                    let data = ChatCompletionsResponse {
+                        id: req_id.to_string(),
+                        object: object.to_owned(),
+                        created,
+                        model: payload.model.to_owned(),
+                        system_fingerprint: None,
+                        choices: vec![
+                            ChatCompletionsChoice {
+                                index: 0,
+                                message: None,
+                                delta: Some(ChatCompletionsChoiceDelta {
+                                    role,
+                                    content: chunk,
+                                }),
+                                logprobs: None,
+                                finish_reason,
+                            }
+                        ],
+                        usage: None,
+                    };
+
+                    let event: Result<Event, Error> = Ok(Event::default().json_data(data).unwrap());
+                    yield event;
+
+                    if done {
+                        break;
+                    }
                 }
-                let role = if first_response {
-                    first_response = false;
-                    Some("assistant".to_owned())
-                } else {
-                    None
-                };
-
-                let data = ChatCompletionsResponse {
-                    id: req_id.to_string(),
-                    object: object.to_owned(),
-                    created,
-                    model: payload.model.to_owned(),
-                    system_fingerprint: None,
-                    choices: vec![
-                        ChatCompletionsChoice {
-                            index: 0,
-                            message: None,
-                            delta: Some(ChatCompletionsChoiceDelta {
-                                role,
-                                content: chunk,
-                            }),
-                            logprobs: None,
-                            finish_reason,
-                        }
-                    ],
-                    usage: None,
-                };
-
-                let event: Result<Event, Error> = Ok(Event::default().json_data(data).unwrap());
-                yield event;
-
-                if done {
-                    break;
-                }
-            }
-        });
+            });
 
             Sse::new(stream_responder)
                 .keep_alive(KeepAlive::default())

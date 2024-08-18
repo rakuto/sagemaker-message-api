@@ -121,3 +121,11 @@ pub struct BedrockResponse {
     pub generation: String,
     pub stop_reason: String,
 }
+
+#[derive(Deserialize, Debug, Default)]
+pub struct BedrockStreamResponse {
+    pub generation: String,
+    pub prompt_token_count: Option<i64>,
+    pub generation_token_count: Option<i64>,
+    pub stop_reason: Option<String>,
+}
